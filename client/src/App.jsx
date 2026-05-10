@@ -3,6 +3,24 @@ import React, { useEffect, useMemo, useState } from "react";
 const API = import.meta.env.VITE_API_BASE || "http://localhost:8787";
 const STORAGE_PREFIX = "autoflow.automation.";
 const DRAFT_KEY = "autoflow.draft";
+const BROWSER_EXAMPLES = [
+  {
+    name: "Hacker News Top Stories",
+    steps: "Open Hacker News and return the top 10 stories with score and URL.",
+  },
+  {
+    name: "GitHub Trending Repos",
+    steps: "Open GitHub Trending and return the top 8 trending repositories with language, stars, and description.",
+  },
+  {
+    name: "Books To Scrape",
+    steps: "Open books.toscrape.com and return the first 8 books with title, price, rating, and stock status.",
+  },
+  {
+    name: "Quotes Session Check",
+    steps: "Open quotes.toscrape.com/login using a saved browser session and verify whether the session is already authenticated.",
+  },
+];
 const INITIAL_AUTOMATION = {
   id: "",
   name: "",
@@ -36,6 +54,39 @@ async function af(path, init = {}) {
 
 function automationSignature(name, steps) {
   return JSON.stringify([name.trim(), steps.trim()]);
+}
+
+function extractPromptDefaults(name, steps, fields) {
+  const text = `${name}\n${steps}`;
+  const defaults = {};
+
+  for (const field of fields || []) {
+    if (field.name === "target_url") {
+      const urlMatch = text.match(/https?:\/\/[^\s)"]+/i);
+      if (urlMatch) {
+        defaults[field.name] = urlMatch[0];
+      }
+    }
+
+    if (field.name === "query") {
+      const quotedCrossMatch = text.match(/cross match against\s*:\s*"([^"]+)"/i);
+      const lineCrossMatch = text.match(/cross match against\s*:\s*([^\n]+)/i);
+      if (quotedCrossMatch) {
+        defaults[field.name] = quotedCrossMatch[1].trim();
+      } else if (lineCrossMatch) {
+        defaults[field.name] = lineCrossMatch[1].replace(/^["']|["']$/g, "").trim();
+      }
+    }
+
+    if (field.name === "profile_url") {
+      const urlMatch = text.match(/https?:\/\/[^\s)"]+/i);
+      if (urlMatch) {
+        defaults[field.name] = urlMatch[0];
+      }
+    }
+  }
+
+  return defaults;
 }
 
 function createId() {
@@ -312,43 +363,89 @@ function BuildWorkspace({
     setAutomation((current) => ({ ...current, ...patch }));
   }
 
+  async function createSharedLinkPayload(currentAutomation) {
+    const response = await af("/api/shared-automations", {
+      method: "POST",
+      body: JSON.stringify({
+        id: currentAutomation.id || undefined,
+        name: currentAutomation.name.trim() || "Untitled automation",
+        steps: currentAutomation.steps,
+        preparedAutomation: currentAutomation.preparedAutomation,
+        preparedSignature:
+          currentAutomation.preparedSignature ||
+          automationSignature(currentAutomation.name, currentAutomation.steps),
+        params: currentAutomation.params || {},
+      }),
+    });
+
+    return response.shareId;
+  }
+
   async function generatePlan() {
     if (!automation.steps.trim()) {
       setRun({ status: "needs-input", error: "Describe the task before generating a plan." });
       return null;
     }
 
-    setRun({ status: "preparing", result: null, display: null, error: "", connectUrl: "" });
-    const preparedAutomation = await af("/api/automations/prepare", {
-      method: "POST",
-      body: JSON.stringify({
-        name: automation.name.trim() || "Untitled automation",
-        steps: automation.steps,
-      }),
-    });
+    try {
+      setRun({ status: "preparing", result: null, display: null, error: "", connectUrl: "" });
+      const preparedAutomation = await af("/api/automations/prepare", {
+        method: "POST",
+        body: JSON.stringify({
+          name: automation.name.trim() || "Untitled automation",
+          steps: automation.steps,
+        }),
+      });
 
-    const signature = automationSignature(automation.name, automation.steps);
-    const mergedParams = { ...automation.params };
-    for (const field of preparedAutomation.paramFields || []) {
-      if (!(field.name in mergedParams)) {
-        mergedParams[field.name] = "";
+      const signature = automationSignature(automation.name, automation.steps);
+      const mergedParams = { ...automation.params };
+      const promptDefaults = extractPromptDefaults(
+        automation.name,
+        automation.steps,
+        preparedAutomation.paramFields || [],
+      );
+      for (const field of preparedAutomation.paramFields || []) {
+        if (!(field.name in mergedParams)) {
+          mergedParams[field.name] = promptDefaults[field.name] || "";
+        } else if (!String(mergedParams[field.name] || "").trim() && promptDefaults[field.name]) {
+          mergedParams[field.name] = promptDefaults[field.name];
+        }
       }
+
+      const nextAutomation = {
+        ...automation,
+        id: automation.id || createId(),
+        preparedAutomation,
+        preparedSignature: signature,
+        params: mergedParams,
+      };
+
+      setAutomation(nextAutomation);
+      persistAutomation(nextAutomation, false);
+      refreshSavedAutomations();
+      setRun({ status: "idle", result: null, display: null, error: "", connectUrl: "" });
+      setBanner("Plan generated and autosaved.");
+      return nextAutomation;
+    } catch (error) {
+      setRun({
+        status: "error",
+        result: null,
+        display: null,
+        error: error.message || "Could not generate a plan.",
+        connectUrl: "",
+      });
+      return null;
     }
+  }
 
-    const nextAutomation = {
-      ...automation,
-      id: automation.id || createId(),
-      preparedAutomation,
-      preparedSignature: signature,
-      params: mergedParams,
-    };
-
-    setAutomation(nextAutomation);
-    persistAutomation(nextAutomation, false);
-    refreshSavedAutomations();
+  function loadExample(example) {
+    setAutomation({
+      ...INITIAL_AUTOMATION,
+      name: example.name,
+      steps: example.steps,
+    });
     setRun({ status: "idle", result: null, display: null, error: "", connectUrl: "" });
-    setBanner("Plan generated and autosaved.");
-    return nextAutomation;
+    setBanner(`Loaded example: ${example.name}`);
   }
 
   function validateBeforeRun(currentAutomation) {
@@ -436,18 +533,33 @@ function BuildWorkspace({
     }
   }
 
-  function copyShareLink() {
+  async function copyShareLink() {
     if (!automation.steps.trim()) {
       setBanner("Add a task before sharing.");
       return;
     }
 
-    const shareUrl = `${window.location.origin}${window.location.pathname}?share=${serializeSharePayload({
-      ...automation,
-      id: automation.id || createId(),
-    })}`;
-    navigator.clipboard.writeText(shareUrl).catch(() => {});
-    setBanner("Share link copied. Anyone can open it, fill inputs, and run it.");
+    try {
+      let currentAutomation = automation;
+      const currentSignature = automationSignature(automation.name, automation.steps);
+
+      if (!automation.preparedAutomation || automation.preparedSignature !== currentSignature) {
+        const regenerated = await generatePlan();
+        if (!regenerated) {
+          return;
+        }
+        currentAutomation = regenerated;
+      }
+
+      const shareId = await createSharedLinkPayload(currentAutomation);
+      const shareUrl = `${window.location.origin}${window.location.pathname}?shareId=${encodeURIComponent(
+        shareId,
+      )}`;
+      navigator.clipboard.writeText(shareUrl).catch(() => {});
+      setBanner("Share link copied. Anyone can open it, fill inputs, and run it.");
+    } catch (error) {
+      setBanner(error.message || "Could not create share link.");
+    }
   }
 
   return (
@@ -478,6 +590,22 @@ function BuildWorkspace({
             onChange={(event) => updateAutomation({ steps: event.target.value })}
           />
         </label>
+
+        <div className="field">
+          <span>Browser examples</span>
+          <div className="tag-row">
+            {BROWSER_EXAMPLES.map((example) => (
+              <button
+                className="ghost-button"
+                key={example.name}
+                type="button"
+                onClick={() => loadExample(example)}
+              >
+                {example.name}
+              </button>
+            ))}
+          </div>
+        </div>
 
         {automation.preparedAutomation?.paramFields?.length ? (
           <div className="input-grid">
@@ -713,8 +841,30 @@ function App() {
     setSavedAutomations(listSavedAutomations());
 
     const params = new URLSearchParams(window.location.search);
+    const shareId = params.get("shareId");
     const share = params.get("share");
     const savedId = params.get("id");
+
+    if (shareId) {
+      af(`/api/shared-automations/${encodeURIComponent(shareId)}`)
+        .then((response) => {
+          if (!response.automation) {
+            return;
+          }
+          setAutomation({
+            ...INITIAL_AUTOMATION,
+            ...response.automation,
+            sessionId: "",
+            credentialId: "",
+          });
+          setView("build");
+          setBanner("Shared automation loaded. Fill inputs and run it.");
+        })
+        .catch(() => {
+          setBanner("Shared automation could not be loaded.");
+        });
+      return;
+    }
 
     if (share) {
       const sharedAutomation = deserializeSharePayload(share);
@@ -812,10 +962,30 @@ function App() {
     setBanner("Automation deleted.");
   }
 
-  function shareAutomation(record) {
-    const shareUrl = `${window.location.origin}${window.location.pathname}?share=${serializeSharePayload(record)}`;
-    navigator.clipboard.writeText(shareUrl).catch(() => {});
-    setBanner("Share link copied.");
+  async function shareAutomation(record) {
+    try {
+      const shareId = await af("/api/shared-automations", {
+        method: "POST",
+        body: JSON.stringify({
+          id: record.id || undefined,
+          name: record.name,
+          steps: record.steps,
+          preparedAutomation: record.preparedAutomation,
+          preparedSignature:
+            record.preparedSignature || automationSignature(record.name, record.steps),
+          params: record.params || {},
+          createdAt: record.createdAt,
+        }),
+      }).then((response) => response.shareId);
+
+      const shareUrl = `${window.location.origin}${window.location.pathname}?shareId=${encodeURIComponent(
+        shareId,
+      )}`;
+      navigator.clipboard.writeText(shareUrl).catch(() => {});
+      setBanner("Share link copied.");
+    } catch (error) {
+      setBanner(error.message || "Could not create share link.");
+    }
   }
 
   const navigation = [

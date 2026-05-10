@@ -1,0 +1,48 @@
+{
+  "automations": [
+    {
+      "id": "2a49f895",
+      "name": "HN Top Stories",
+      "steps": "Open Hacker News and return the top 10 stories with score",
+      "preparedAutomation": {
+        "mode": "browser",
+        "routeReason": "Browser API test",
+        "requiresSession": false,
+        "sessionKind": "none",
+        "paramFields": [],
+        "wire": null,
+        "browser": {
+          "startUrl": "https://news.ycombinator.com",
+          "resultShape": "json",
+          "script": "await page.goto('https://news.ycombinator.com', { waitUntil: 'domcontentloaded' }); return { success: true, data: { ok: true } };"
+        }
+      },
+      "preparedSignature": "test-signature",
+      "params": {},
+      "createdAt": "2026-05-10T10:34:44.542Z",
+      "updatedAt": "2026-05-10T10:34:44.542Z"
+    },
+    {
+      "id": "177948bf-5b39-4fb5-8005-495df0e0d3d7",
+      "name": "Books To Scrape",
+      "steps": "Open books.toscrape.com and return the first 8 books with title, price, rating, and stock status.",
+      "preparedAutomation": {
+        "mode": "browser",
+        "routeReason": "This is a straightforward browser scraping task, so Browser API is the correct route.",
+        "requiresSession": false,
+        "sessionKind": "none",
+        "paramFields": [],
+        "wire": null,
+        "browser": {
+          "startUrl": "https://books.toscrape.com",
+          "resultShape": "json",
+          "script": "await page.goto('https://books.toscrape.com', { waitUntil: 'domcontentloaded' });\nawait page.waitForSelector('article.product_pod');\nreturn {\n  success: true,\n  data: await page.$$eval('article.product_pod', (cards) =>\n    cards.slice(0, 8).map((card) => ({\n      title: card.querySelector('h3 a')?.getAttribute('title') ?? '',\n      price: card.querySelector('.price_color')?.textContent?.trim() ?? '',\n      rating: card.querySelector('p.star-rating')?.className.split(' ')[1] ?? '',\n      inStock: card.querySelector('.availability')?.textContent?.trim() ?? '',\n    })),\n  ),\n};"
+        }
+      },
+      "preparedSignature": "[\"Books To Scrape\",\"Open books.toscrape.com and return the first 8 books with title, price, rating, and stock status.\"]",
+      "params": {},
+      "createdAt": "2026-05-10T10:47:27.025Z",
+      "updatedAt": "2026-05-10T10:47:27.025Z"
+    }
+  ]
+}

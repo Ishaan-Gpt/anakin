@@ -49,6 +49,186 @@ function ensurePlanFields(plan, name, steps) {
   };
 }
 
+function extractFirstUrl(text) {
+  const match = text.match(/https?:\/\/[^\s)"]+/i);
+  return match ? match[0] : "";
+}
+
+function extractCrossMatchQuery(text) {
+  const quotedMatch = text.match(/cross match against\s*:\s*"([^"]+)"/i);
+  if (quotedMatch) {
+    return quotedMatch[1].trim();
+  }
+
+  const lineMatch = text.match(/cross match against\s*:\s*([^\n]+)/i);
+  if (lineMatch) {
+    return lineMatch[1].replace(/^["']|["']$/g, "").trim();
+  }
+
+  return "";
+}
+
+function buildFacultyOutreachPlan(name, steps) {
+  const startUrl = extractFirstUrl(steps) || "https://example.com";
+  const researchQuery = extractCrossMatchQuery(steps);
+
+  return {
+    mode: "browser",
+    routeReason:
+      "This is a custom faculty-research extraction and ranking task, so Browser API is the correct route.",
+    requiresSession: false,
+    sessionKind: "none",
+    paramFields: [
+      {
+        name: "target_url",
+        label: "Target URL",
+        required: true,
+        placeholder: startUrl,
+      },
+      {
+        name: "query",
+        label: "Research query",
+        required: true,
+        placeholder: researchQuery || "multimodal LLMs and robotics",
+      },
+    ],
+    wire: null,
+    browser: {
+      startUrl,
+      resultShape: "json",
+      script: `const startUrl = params.target_url || ${JSON.stringify(startUrl)};
+const researchQuery = (params.query || ${JSON.stringify(researchQuery)}).trim();
+const queryTerms = researchQuery
+  .toLowerCase()
+  .split(/[^a-z0-9+]+/)
+  .map((term) => term.trim())
+  .filter((term) => term.length > 2);
+
+function scoreText(text) {
+  const lower = String(text || '').toLowerCase();
+  let score = 0;
+  for (const term of queryTerms) {
+    if (lower.includes(term)) {
+      score += term.length > 6 ? 3 : 2;
+    }
+  }
+  if (lower.includes('multimodal')) score += 4;
+  if (lower.includes('llm') || lower.includes('large language model')) score += 4;
+  if (lower.includes('robotics') || lower.includes('robot')) score += 4;
+  return score;
+}
+
+function extractEmails(text) {
+  return Array.from(new Set((String(text || '').match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\\.[A-Z]{2,}/gi) || [])));
+}
+
+async function collectListingLinks() {
+  await page.goto(startUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+  await page.waitForLoadState('networkidle').catch(() => {});
+  return await page.$$eval('a[href]', (anchors, origin) => {
+    return Array.from(new Set(anchors.map((anchor) => {
+      const href = anchor.getAttribute('href') || '';
+      const text = (anchor.textContent || '').trim();
+      try {
+        const absolute = new URL(href, origin).toString();
+        return JSON.stringify({ href: absolute, text });
+      } catch {
+        return '';
+      }
+    }).filter(Boolean))).map((entry) => JSON.parse(entry)).filter((entry) => {
+      const href = entry.href.toLowerCase();
+      const text = entry.text.toLowerCase();
+      return (
+        href.startsWith(new URL(origin).origin) &&
+        (
+          href.includes('/faculty') ||
+          href.includes('/people') ||
+          href.includes('/person') ||
+          text.includes('prof') ||
+          text.includes('faculty')
+        )
+      );
+    });
+  }, startUrl);
+}
+
+async function extractProfile(url, fallbackName) {
+  await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
+  await page.waitForLoadState('networkidle').catch(() => {});
+  return await page.evaluate(({ fallbackName, researchQuery }) => {
+    const titleCandidates = [
+      document.querySelector('h1'),
+      document.querySelector('h2'),
+      document.querySelector('.page-title'),
+      document.querySelector('.title'),
+      document.querySelector('.name'),
+    ].filter(Boolean);
+
+    const fullText = document.body ? document.body.innerText.replace(/\\s+/g, ' ').trim() : '';
+    const pageText = fullText.slice(0, 8000);
+    const emailMatches = Array.from(new Set((document.body?.innerHTML.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\\.[A-Z]{2,}/gi) || [])));
+    const mailtoLinks = Array.from(document.querySelectorAll('a[href^="mailto:"]'))
+      .map((anchor) => anchor.getAttribute('href')?.replace(/^mailto:/i, '').trim())
+      .filter(Boolean);
+    const emails = Array.from(new Set([...emailMatches, ...mailtoLinks]));
+
+    const lines = (document.body?.innerText || '')
+      .split('\\n')
+      .map((line) => line.trim())
+      .filter(Boolean);
+
+    const researchLines = lines.filter((line) => /research|interest|area|speciali[sz]ation/i.test(line)).slice(0, 12);
+    const researchInterests = researchLines.join(' | ') || pageText.slice(0, 1000);
+    const professorName = titleCandidates[0]?.textContent?.trim() || fallbackName || document.title || 'Unknown Professor';
+
+    return {
+      professorName,
+      emails,
+      researchInterests,
+      pageText,
+      pageUrl: window.location.href,
+      researchQuery,
+    };
+  }, { fallbackName, researchQuery });
+}
+
+const listingLinks = await collectListingLinks();
+const profileLinks = listingLinks.slice(0, 30);
+const professors = [];
+
+for (const link of profileLinks) {
+  try {
+    const profile = await extractProfile(link.href, link.text);
+    const researchText = [profile.researchInterests, profile.pageText].join(' ');
+    const matchScore = scoreText(researchText);
+    professors.push({
+      professor_name: profile.professorName,
+      email: profile.emails[0] || '',
+      research_interests: profile.researchInterests,
+      research_match_score: matchScore,
+      source_url: profile.pageUrl,
+      draft_email:
+        'Subject: Potential research collaboration\\n\\nDear ' +
+        profile.professorName +
+        ',\\n\\nI came across your work and was especially interested in ' +
+        (profile.researchInterests.slice(0, 220) || 'your recent research.') +
+        ' My work focuses on ' +
+        researchQuery +
+        ', and I believe there may be meaningful overlap between our interests. I would value the chance to briefly connect and learn whether there may be a fit for collaboration or research discussion.\\n\\nBest regards,\\n[Your Name]',
+    });
+  } catch {}
+}
+
+professors.sort((left, right) => right.research_match_score - left.research_match_score);
+
+return {
+  success: true,
+  data: professors.slice(0, 5),
+};`,
+    },
+  };
+}
+
 function buildYcSearchPlan() {
   return {
     mode: "wire",
@@ -201,42 +381,26 @@ return {
   ) {
     return {
       mode: "browser",
-      routeReason: "Form fill and submit flows are custom browser automations, so Browser API is the right runtime.",
-      requiresSession: false,
-      sessionKind: "none",
-      paramFields: [
-        {
-          name: "username",
-          label: "Username",
-          required: true,
-          placeholder: "testuser",
-        },
-        {
-          name: "password",
-          label: "Password",
-          required: true,
-          placeholder: "testpass",
-        },
-      ],
+      routeReason: "This flow expects a manually created saved browser session, then reuses that authenticated state at runtime.",
+      requiresSession: true,
+      sessionKind: "browser_session",
+      paramFields: [],
       wire: null,
       browser: {
         startUrl: "https://quotes.toscrape.com/login",
         resultShape: "json",
         script: `await page.goto('https://quotes.toscrape.com/login', { waitUntil: 'domcontentloaded' });
-await page.waitForSelector('input[name="username"]');
-await page.fill('input[name="username"]', params.username || '');
-await page.fill('input[name="password"]', params.password || '');
-await Promise.all([
-  page.waitForNavigation({ waitUntil: 'domcontentloaded' }),
-  page.click('input[type="submit"]'),
-]);
 const logoutLink = await page.$('a[href="/logout"]');
+const loginForm = await page.$('input[name="username"]');
+if (!logoutLink && loginForm) {
+  throw new Error('Selected browser session is not authenticated for this site. Create the session manually first, then rerun.');
+}
 return {
   success: true,
   data: {
     url: page.url(),
     title: await page.title(),
-    loggedIn: Boolean(logoutLink),
+    authenticated: Boolean(logoutLink),
   },
 };`,
       },
@@ -271,7 +435,49 @@ function detectDirectPlan(name, steps) {
     return browserExamplePlan;
   }
 
+  if (
+    text.includes("faculty") &&
+    text.includes("research") &&
+    (text.includes("cold email") || text.includes("draft email") || text.includes("rank by relevance"))
+  ) {
+    return buildFacultyOutreachPlan(name, steps);
+  }
+
   return null;
+}
+
+function buildGenericBrowserFallbackPlan(name, steps, reason) {
+  return {
+    mode: "browser",
+    routeReason:
+      reason ||
+      "Falling back to a generic Browser API plan so the automation can still be prepared.",
+    requiresSession: false,
+    sessionKind: "none",
+    paramFields: [
+      {
+        name: "target_url",
+        label: "Target URL",
+        required: true,
+        placeholder: "https://example.com",
+      },
+    ],
+    wire: null,
+    browser: {
+      startUrl: "https://example.com",
+      resultShape: "json",
+      script: `await page.goto(params.target_url || 'https://example.com', { waitUntil: 'domcontentloaded' });
+return {
+  success: true,
+  data: {
+    name: ${JSON.stringify(name)},
+    url: page.url(),
+    title: await page.title(),
+    summary: ${JSON.stringify(steps)},
+  },
+};`,
+    },
+  };
 }
 
 export async function prepareAutomation({
@@ -288,15 +494,34 @@ export async function prepareAutomation({
     return ensurePlanFields(directPlan, input.name, input.steps);
   }
 
-  const searchResponse = await searchActions(anakinApiKey, `${input.name} ${input.steps}`);
-  const candidates = toActionCandidates(searchResponse);
-  const planned = await planAutomation({
-    apiKey: geminiApiKey,
-    model,
-    name: input.name,
-    steps: input.steps,
-    actionCandidates: candidates,
-  });
+  let candidates = [];
+  try {
+    const searchResponse = await searchActions(anakinApiKey, `${input.name} ${input.steps}`);
+    candidates = toActionCandidates(searchResponse);
+  } catch {
+    candidates = [];
+  }
+
+  let planned;
+  try {
+    planned = await planAutomation({
+      apiKey: geminiApiKey,
+      model,
+      name: input.name,
+      steps: input.steps,
+      actionCandidates: candidates,
+    });
+  } catch {
+    return ensurePlanFields(
+      buildGenericBrowserFallbackPlan(
+        input.name,
+        input.steps,
+        "Planner service could not produce a structured route, so AutoFlow prepared a generic Browser API automation instead.",
+      ),
+      input.name,
+      input.steps,
+    );
+  }
 
   if (planned.mode === "wire") {
     const matched = pickMatchingAction(planned, candidates);

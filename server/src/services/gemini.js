@@ -8,12 +8,14 @@ const paramFieldSchema = z.object({
   placeholder: z.string().default(""),
 });
 
+const looseParamFieldSchema = z.union([paramFieldSchema, z.string().min(1)]);
+
 const plannerResponseSchema = z.object({
   mode: z.enum(["wire", "browser"]).default("browser"),
   routeReason: z.string().nullable().optional(),
   requiresSession: z.boolean().nullable().optional(),
   sessionKind: z.enum(["none", "browser_session", "identity_credential"]).nullable().optional(),
-  paramFields: z.array(paramFieldSchema).nullable().optional(),
+  paramFields: z.array(looseParamFieldSchema).nullable().optional(),
   actionId: z.string().nullable().optional(),
   catalogSlug: z.string().nullable().optional(),
   authRequired: z.boolean().nullable().optional(),
@@ -105,9 +107,44 @@ function inferResultShape(script) {
   return /return\s*\{\s*success:\s*true,\s*data:\s*\{/.test(script) ? "json" : "text";
 }
 
+function normalizeParamFields(fields) {
+  return (fields || [])
+    .map((field) => {
+      if (typeof field === "string") {
+        const trimmed = field.trim();
+        if (!trimmed) {
+          return null;
+        }
+        const name = trimmed
+          .toLowerCase()
+          .replace(/[^a-z0-9]+/g, "_")
+          .replace(/^_+|_+$/g, "");
+        return {
+          name: name || "input",
+          label: trimmed,
+          required: true,
+          placeholder: "",
+        };
+      }
+
+      if (!field?.name || !field?.label) {
+        return null;
+      }
+
+      return {
+        name: field.name,
+        label: field.label,
+        required: field.required ?? true,
+        placeholder: field.placeholder || "",
+      };
+    })
+    .filter(Boolean);
+}
+
 function inferParamFields(name, steps, existingFields) {
-  if (existingFields?.length) {
-    return existingFields;
+  const normalizedExistingFields = normalizeParamFields(existingFields);
+  if (normalizedExistingFields.length) {
+    return normalizedExistingFields;
   }
 
   const text = `${name} ${steps}`.toLowerCase();
@@ -143,7 +180,7 @@ function inferParamFields(name, steps, existingFields) {
   return fields;
 }
 
-function normalizePlannerResponse(parsed, steps) {
+function normalizePlannerResponse(parsed, name, steps) {
   const mode = parsed.mode || "browser";
   const script = sanitizeScript(parsed.browser?.script || parsed.script || "");
 
@@ -162,7 +199,7 @@ function normalizePlannerResponse(parsed, steps) {
           ? "identity_credential"
           : "browser_session"
         : "none"),
-    paramFields: inferParamFields(parsed.title || "", steps, parsed.paramFields || []),
+    paramFields: inferParamFields(name, steps, parsed.paramFields || []),
     wire:
       mode === "wire"
         ? {
@@ -194,5 +231,5 @@ export async function planAutomation({ apiKey, model, name, steps, actionCandida
   });
 
   const parsed = plannerResponseSchema.parse(JSON.parse(response.text));
-  return normalizePlannerResponse(parsed, steps);
+  return normalizePlannerResponse(parsed, name, steps);
 }
