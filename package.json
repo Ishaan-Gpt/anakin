@@ -1,0 +1,20 @@
+{
+  "name": "anakin-autoflow",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "client",
+    "server"
+  ],
+  "scripts": {
+    "dev": "npm-run-all --parallel dev:server dev:client",
+    "dev:client": "npm --workspace client run dev",
+    "dev:server": "npm --workspace server run dev",
+    "probe": "npm --workspace server run probe",
+    "build": "npm --workspace server run check && npm --workspace client run build",
+    "check": "npm --workspace server run check && npm --workspace client run build"
+  },
+  "devDependencies": {
+    "npm-run-all": "^4.1.5"
+  }
+}
